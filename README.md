@@ -7,8 +7,8 @@
 ### 📍 Muthoot Institute of Technology and Science
 
 <p align="center">
-  <!-- Add ACM Logo here -->
-  <img src="ACM_LOGO_LINK" width="200"/>
+  <img width="500" height="322" alt="acm_logo" src="https://github.com/user-attachments/assets/dce73ce8-25bf-443a-87f3-843b3bee4b31" />
+
 </p>
 
 ---
