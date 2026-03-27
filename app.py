@@ -1,188 +1,201 @@
 import datetime
 import os
-
 import matplotlib.pyplot as plt
 import streamlit as st
+import folium
+from streamlit_folium import st_folium
+from folium.plugins import HeatMap
 from dotenv import load_dotenv
+from geopy.geocoders import Nominatim
 
-from alert_system import (
-    build_priority_message,
-    format_status,
-    offline_alert_text,
-    simulate_delivery,
-)
+# Safe geolocation
+try:
+    from streamlit_js_eval import get_geolocation
+    GEO_AVAILABLE = True
+except:
+    GEO_AVAILABLE = False
+
+from alert_system import format_status, simulate_delivery
 from data_fetch import prepare_fused_data
-from risk_analysis import (
-    forecast_risk,
-    generate_recommendation,
-    prepare_risk_series,
-)
+from risk_analysis import forecast_risk, generate_recommendation, prepare_risk_series
 
-# Load API key from environment.
+# ✅ MUST BE FIRST
+st.set_page_config(page_title="Climate Intelligence System", page_icon="🌊", layout="wide")
+
+# 🔐 Load API
 load_dotenv()
 API_KEY = os.getenv("STORMGLASS_API_KEY")
 
-st.set_page_config(
-    page_title="Climate Intelligence System",
-    page_icon="🌊",
-    layout="wide",
-)
-
 if not API_KEY:
-    st.title("Climate Intelligence System")
-    st.error("API key not found. Please add STORMGLASS_API_KEY to your .env file.")
+    st.error("API key not found")
     st.stop()
 
-
-@st.cache_data(ttl=300)
-def load_weather_data(api_key: str, lat: float, lon: float, hours: int):
-    """Fetch fused weather and risk data for the requested location."""
-    return prepare_fused_data(api_key, lat, lon, hours)
-
-
-def parse_timestamp(timestamp: str) -> datetime.datetime:
-    """Parse an ISO timestamp string into a datetime object."""
-    if timestamp.endswith("Z"):
-        timestamp = timestamp.replace("Z", "+00:00")
-    return datetime.datetime.fromisoformat(timestamp)
-
-
-def get_data_age_minutes(timestamp: str) -> float:
-    """Return the age of the latest data in minutes."""
-    try:
-        data_time = parse_timestamp(timestamp)
-        age = datetime.datetime.utcnow() - data_time.replace(tzinfo=None)
-        return age.total_seconds() / 60.0
-    except Exception:
-        return 999.0
-
-
+# 🌊 TITLE
 st.title("🌊 Coastal Climate Intelligence System")
-st.markdown(
-    "This system combines multi-source coastal data, prediction, anomaly detection, and actionable alerts."
-)
 
+# 📌 DEFAULT LOCATION
+DEFAULT_LAT = 9.9312
+DEFAULT_LON = 76.2673
+
+# 🧠 SESSION STATE (IMPORTANT)
+if "lat" not in st.session_state:
+    st.session_state["lat"] = DEFAULT_LAT
+if "lon" not in st.session_state:
+    st.session_state["lon"] = DEFAULT_LON
+
+lat = st.session_state["lat"]
+lon = st.session_state["lon"]
+
+# 📍 LOCATION CONTROLS
+st.subheader("📍 Location Controls")
+
+# 🔍 SEARCH
+geolocator = Nominatim(user_agent="coastal_app")
+location_name = st.text_input("🔍 Search location (e.g., Kochi, Chennai)")
+
+if location_name:
+    location = geolocator.geocode(location_name)
+    if location:
+        st.session_state["lat"] = location.latitude
+        st.session_state["lon"] = location.longitude
+        lat, lon = location.latitude, location.longitude
+        st.success(f"📍 {location.address}")
+    else:
+        st.error("Location not found")
+
+# 📍 CURRENT LOCATION
+if GEO_AVAILABLE:
+    if st.button("📍 Use My Current Location"):
+        loc = get_geolocation()
+        if loc:
+            st.session_state["lat"] = loc["coords"]["latitude"]
+            st.session_state["lon"] = loc["coords"]["longitude"]
+            lat, lon = st.session_state["lat"], st.session_state["lon"]
+            st.success(f"Using: {lat:.4f}, {lon:.4f}")
+
+# 📌 SIDEBAR
 with st.sidebar:
     st.header("Settings")
-    lat = st.number_input("Latitude", value=9.9312, format="%.4f")
-    lon = st.number_input("Longitude", value=76.2673, format="%.4f")
+    lat = st.number_input("Latitude", value=st.session_state["lat"])
+    lon = st.number_input("Longitude", value=st.session_state["lon"])
     profile = st.radio("User profile", ["Fishermen", "Residents"])
-    forecast_hours = st.slider("Forecast horizon (hours)", 3, 9, 6)
-    refresh = st.button("🔄 Refresh Data")
-    st.markdown("---")
-    st.write("**This version supports:**")
-    st.write("- Multi-source fusion (StormGlass, NOAA, ECMWF)")
-    st.write("- Dynamic risk classification")
-    st.write("- Prediction probabilities")
-    st.write("- Offline-friendly alert text")
+    forecast_hours = st.slider("Forecast hours", 3, 9, 6)
 
-if refresh:
-    st.experimental_rerun()
+    st.session_state["lat"] = lat
+    st.session_state["lon"] = lon
+
+# 📡 DATA
+@st.cache_data(ttl=300)
+def load_weather_data(api_key, lat, lon, hours):
+    return prepare_fused_data(api_key, lat, lon, hours)
 
 weather_bundle = load_weather_data(API_KEY, lat, lon, forecast_hours)
 fused_data = weather_bundle.get("fused", [])
 
 if not fused_data:
-    st.error("Unable to load fused weather data. Please try again later.")
+    st.error("Failed to load data")
     st.stop()
 
 risk_series = prepare_risk_series(fused_data)
 current = risk_series[0]
-forecast = forecast_risk(risk_series, horizon=forecast_hours)
+forecast = forecast_risk(risk_series, forecast_hours)
 
-status_age = get_data_age_minutes(current["time"])
-status_label = format_status(lat, lon, status_age)
+# 🗺️ MAP
+st.subheader("🗺️ Coastal Risk Map")
 
-st.markdown("---")
+m = folium.Map(location=[lat, lon], zoom_start=7)
 
-# Top summary cards
-st.subheader("📌 Summary")
-metric_cols = st.columns(4)
-metric_cols[0].metric("Location", f"{lat:.4f}, {lon:.4f}")
-metric_cols[1].metric("Data Status", status_label)
-metric_cols[2].metric("Risk", f"{current['riskEmoji']} {current['riskLabel']}")
-metric_cols[3].metric("Age", f"{int(status_age)} min")
+color_map = {
+    "SAFE": "green",
+    "CAUTION": "orange",
+    "DANGER": "red",
+    "EXTREME": "black"
+}
 
-st.markdown("---")
+# Marker
+folium.Marker(
+    [lat, lon],
+    popup=f"Risk: {current['riskLabel']}"
+).add_to(m)
 
-# Alert section
-alert_text = f"Current conditions are {current['riskLabel']}."
-if current["spike"] > 0.2:
-    alert_text += " A sudden spike has been detected in recent readings."
+# Danger Zone
+folium.Circle(
+    location=[lat, lon],
+    radius=20000,
+    color=color_map[current["riskLabel"]],
+    fill=True,
+    fill_opacity=0.4
+).add_to(m)
 
-if current["riskLabel"] == "SAFE":
-    st.success(alert_text)
+# Heatmap
+heat_data = [[lat, lon, e["riskScore"]] for e in risk_series[:6]]
+HeatMap(heat_data).add_to(m)
+
+map_data = st_folium(m, height=400, width=700)
+
+# 📌 CLICK UPDATE
+if map_data and map_data.get("last_clicked"):
+    st.session_state["lat"] = map_data["last_clicked"]["lat"]
+    st.session_state["lon"] = map_data["last_clicked"]["lng"]
+    st.rerun()
+
+# 🚨 ALERT
+if current["riskLabel"] in ["DANGER", "EXTREME"]:
+    st.error("🚨 EXTREME RISK: Avoid sea travel")
 elif current["riskLabel"] == "CAUTION":
-    st.warning(alert_text)
-elif current["riskLabel"] == "DANGER":
-    st.error(alert_text)
+    st.warning("⚠️ Moderate risk")
 else:
-    st.error(alert_text)
+    st.success("✅ Safe")
 
-with st.expander("🔮 Forecast alert timeline"):
-    for index, item in enumerate(forecast, start=1):
-        message = build_priority_message(item["predictedLabel"], item["probability"], index)
-        st.write(f"**{item['time'][11:16]}** — {message}")
+# 📊 METRICS
+st.subheader("📊 Current Conditions")
+col1, col2, col3 = st.columns(3)
 
-st.markdown("---")
+col1.metric("Wave Height", f"{current['waveHeight']:.2f} m")
+col2.metric("Wind Speed", f"{current['windSpeed']:.2f} m/s")
+col3.metric("Risk", f"{current['riskEmoji']} {current['riskLabel']}")
 
-# Recommendations and alert delivery
-rec_col1, rec_col2 = st.columns([2, 1])
-with rec_col1:
-    st.subheader("🧭 Recommendation")
-    estimate_probability = forecast[0]["probability"] if forecast else 0
-    recommendation_text = generate_recommendation(
-        current["riskLabel"], profile, current["spike"], estimate_probability
-    )
-    st.info(recommendation_text)
+# 🔮 FORECAST
+st.subheader("🔮 Forecast")
+for item in forecast:
+    st.write(f"{item['time'][11:16]} → {item['predictedLabel']} ({item['probability']}%)")
 
-with rec_col2:
-    st.subheader("📱 Notification simulation")
-    st.write(simulate_delivery(recommendation_text, channel="SMS"))
-    st.write(offline_alert_text(current["riskLabel"], profile, emergency=current["riskLabel"] in ["DANGER", "EXTREME"]))
+# 🧭 RECOMMENDATION
+st.subheader("🧭 Recommendation")
+rec = generate_recommendation(
+    current["riskLabel"],
+    profile,
+    current["spike"],
+    forecast[0]["probability"] if forecast else 0,
+)
+st.info(rec)
 
-st.markdown("---")
+# 📱 ALERT LOGS
+st.subheader("📱 Alerts")
+st.code(simulate_delivery(rec, "SMS"))
 
-# Graphs
-st.subheader("📈 Risk trend and forecast timeline")
-fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 9), sharex=True)
-trend_hours = min(len(risk_series), forecast_hours)
-trend_times = [entry["time"][11:16] for entry in risk_series[:trend_hours]]
-trend_scores = [entry["riskScore"] for entry in risk_series[:trend_hours]]
+# 📈 GRAPH
+st.subheader("📈 Risk Trend")
 
-ax1.plot(trend_times, trend_scores, marker="o", color="navy")
-for index, entry in enumerate(risk_series[:trend_hours]):
-    if entry["riskLabel"] in ["DANGER", "EXTREME"]:
-        ax1.axvspan(index - 0.4, index + 0.4, color="red", alpha=0.1)
-ax1.set_title("Risk score trend")
-ax1.set_ylabel("Risk score")
-ax1.set_ylim(0, 1)
-ax1.grid(True)
+fig, ax = plt.subplots()
+times = [e["time"][11:16] for e in risk_series[:forecast_hours]]
+scores = [e["riskScore"] for e in risk_series[:forecast_hours]]
 
-wave_line = [entry["waveHeight"] for entry in risk_series[:trend_hours]]
-wind_line = [entry["windSpeed"] for entry in risk_series[:trend_hours]]
-ax2.plot(trend_times, wave_line, label="Wave Height (m)", marker="o", color="royalblue")
-ax2.plot(trend_times, wind_line, label="Wind Speed (m/s)", marker="s", color="crimson")
-ax2.set_title("Wave and wind forecast")
-ax2.set_xlabel("Time")
-ax2.set_ylabel("Measurement")
-ax2.legend()
-ax2.grid(True)
-plt.xticks(rotation=45)
-plt.tight_layout()
+ax.plot(times, scores, marker="o")
+ax.set_ylim(0, 1)
+ax.grid(True)
 
 st.pyplot(fig)
 
-st.markdown("---")
+# 📋 TABLE
+st.subheader("📋 Data")
+st.dataframe(risk_series[:forecast_hours])
 
-# Detailed table
-st.subheader("📋 Detailed fused risk data")
-st.dataframe(risk_series[:trend_hours])
-
-st.markdown("---")
-
-st.subheader("🌐 Multi-source fusion")
-st.write(
-    "This system blends observations from StormGlass, NOAA, and ECMWF using a weighted average model "
-    "to improve coastal decision intelligence."
-)
+# 🧭 LEGEND
+st.markdown("""
+### 🧭 Risk Legend
+- 🟢 SAFE  
+- 🟡 CAUTION  
+- 🔴 DANGER  
+- ⚫ EXTREME  
+""")

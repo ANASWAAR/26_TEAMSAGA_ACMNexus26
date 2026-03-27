@@ -12,25 +12,29 @@ RISK_STYLES = {
     "EXTREME": {"emoji": "⚫", "color": "darkred"},
 }
 
-
 def get_dynamic_thresholds(data: List[Dict]) -> Dict[str, float]:
-    """Create a set of thresholds from the current coastal conditions."""
+    """
+    Hybrid thresholds: combines real-world marine limits + dynamic scaling
+    """
+
     waves = [entry["waveHeight"] for entry in data]
     winds = [entry["windSpeed"] for entry in data]
+
     avg_wave = max(0.5, statistics.mean(waves))
     avg_wind = max(4.0, statistics.mean(winds))
 
     return {
-        "safe_wave": avg_wave * 0.7,
-        "caution_wave": avg_wave * 1.1,
-        "danger_wave": avg_wave * 1.7,
-        "extreme_wave": avg_wave * 2.4,
-        "safe_wind": avg_wind * 0.7,
-        "caution_wind": avg_wind * 1.0,
-        "danger_wind": avg_wind * 1.5,
-        "extreme_wind": avg_wind * 2.0,
-    }
+        # REAL BASELINE + dynamic adjustment
+        "safe_wave": max(0.8, avg_wave * 0.7),
+        "caution_wave": max(1.2, avg_wave * 1.1),
+        "danger_wave": max(1.8, avg_wave * 1.6),
+        "extreme_wave": max(2.5, avg_wave * 2.2),
 
+        "safe_wind": max(5.0, avg_wind * 0.7),
+        "caution_wind": max(8.0, avg_wind * 1.0),
+        "danger_wind": max(12.0, avg_wind * 1.4),
+        "extreme_wind": max(15.0, avg_wind * 1.8),
+    }
 
 def compute_spike_score(history: List[Dict], current: Dict) -> float:
     """Detect sudden recent spikes in wave or wind."""
@@ -49,16 +53,25 @@ def compute_spike_score(history: List[Dict], current: Dict) -> float:
 
 
 def compute_risk_score(entry: Dict, thresholds: Dict[str, float], spike_score: float = 0.0) -> float:
-    """Compute a normalized risk score from wave and wind magnitudes."""
+    """
+    Hybrid risk scoring using real thresholds + normalization
+    """
+
     wave = entry["waveHeight"]
     wind = entry["windSpeed"]
 
-    wave_factor = wave / max(thresholds["danger_wave"], 1.0)
-    wind_factor = wind / max(thresholds["danger_wind"], 1.0)
-    raw_score = 0.6 * wave_factor + 0.4 * wind_factor
+    # Normalize against REAL danger levels
+    wave_score = min(wave / thresholds["danger_wave"], 1.0)
+    wind_score = min(wind / thresholds["danger_wind"], 1.0)
+
+    # Weighted importance
+    base_score = (0.6 * wave_score) + (0.4 * wind_score)
+
+    # Spike boost
     spike_bonus = spike_score * 0.25
 
-    return round(min(1.0, max(0.0, raw_score + spike_bonus)), 2)
+    # Final score
+    return round(min(1.0, base_score + spike_bonus), 2)
 
 
 def classify_risk(score: float) -> Tuple[str, Dict[str, str]]:
