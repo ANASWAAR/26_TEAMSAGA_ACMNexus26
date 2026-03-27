@@ -1,0 +1,4 @@
+Refactored Streamlit coastal dashboard into a modular Climate Intelligence System.
+- Added backend files: data_fetch.py, risk_analysis.py, alert_system.py
+- Added dynamic risk prediction, multi-source fusion, and action-oriented alerts
+- Improved UI layout and offline-friendly alert simulation
