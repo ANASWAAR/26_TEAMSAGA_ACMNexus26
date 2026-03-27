@@ -12,7 +12,7 @@ if not API_KEY:
     st.error("API key not found. Check your .env file.")
     st.stop()
 
-# 🌍 API URL
+# 🌍 API URL (Kochi, Kerala, India)
 url = "https://api.stormglass.io/v2/weather/point?lat=9.9312&lng=76.2673&params=waveHeight,windSpeed"
 
 headers = {
@@ -56,15 +56,17 @@ for entry in data:
 # 🎯 Risk logic
 def get_risk(wave, wind):
     if wave > 1.5 or wind > 10:
-        return "HIGH RISK"
+        return "HIGH RISK", "🔴"
     elif wave > 1.0 or wind > 7:
-        return "MEDIUM RISK"
+        return "MEDIUM RISK", "🟡"
     else:
-        return "LOW RISK"
+        return "LOW RISK", "🟢"
 
 # Add risk values
 for entry in processed_data:
-    entry["risk"] = get_risk(entry["waveHeight"], entry["windSpeed"])
+    risk, emoji = get_risk(entry["waveHeight"], entry["windSpeed"])
+    entry["risk"] = risk
+    entry["emoji"] = emoji
 
 # 📊 Limit data
 short_data = processed_data[:8]
@@ -95,34 +97,85 @@ def recommendation(entry):
         return "Safe to operate"
 
 # 🌊 STREAMLIT UI
+st.set_page_config(page_title="Coastal Risk Alert System", page_icon="🌊", layout="wide")
+
 st.title("🌊 Coastal Risk Alert System")
+st.markdown("**Location:** Kochi, Kerala, India")
+st.markdown("---")
+
+# Sidebar for additional info
+with st.sidebar:
+    st.header("ℹ️ About")
+    st.write("This app provides real-time coastal risk assessment based on wave height and wind speed data.")
+    st.write("Data source: Stormglass API")
+    if st.button("🔄 Refresh Data"):
+        st.rerun()
 
 # 📌 Metrics (better UI)
+st.subheader("📊 Current Conditions")
+col1, col2, col3 = st.columns(3)
+with col1:
+    st.metric("Wave Height (m)", f"{current['waveHeight']:.2f}")
+with col2:
+    st.metric("Wind Speed (m/s)", f"{current['windSpeed']:.2f}")
+with col3:
+    st.metric("Risk Level", f"{current['emoji']} {current['risk']}")
+
+st.markdown("---")
+
+# Current Status and Prediction
 col1, col2 = st.columns(2)
-col1.metric("Wave Height (m)", f"{current['waveHeight']}")
-col2.metric("Wind Speed (m/s)", f"{current['windSpeed']}")
+with col1:
+    st.subheader("🏠 Current Status")
+    st.write(f"**Time:** {current['time']}")
+    st.write(f"**Wave Height:** {current['waveHeight']:.2f} m")
+    st.write(f"**Wind Speed:** {current['windSpeed']:.2f} m/s")
+    st.write(f"**Risk:** {current['emoji']} {current['risk']}")
 
-st.subheader("Current Status")
-st.write(current)
+with col2:
+    st.subheader("🔮 Prediction (Next 3 Hours)")
+    st.write(f"**Time:** {future['time']}")
+    st.write(f"**Wave Height:** {future['waveHeight']:.2f} m")
+    st.write(f"**Wind Speed:** {future['windSpeed']:.2f} m/s")
+    st.write(f"**Risk:** {future['emoji']} {future['risk']}")
 
-st.subheader("Prediction (Next 3 Hours)")
-st.write(future)
+st.markdown("---")
 
-st.subheader("Alert")
-st.success(smart_alert(current))
+# Alert
+st.subheader("🚨 Alert")
+if current["risk"] == "HIGH RISK":
+    st.error(smart_alert(current))
+elif current["risk"] == "MEDIUM RISK":
+    st.warning(smart_alert(current))
+else:
+    st.success(smart_alert(current))
+
+st.markdown("---")
 
 # 📈 Graph
-times = [e['time'][:13] for e in short_data]
+st.subheader("📈 Trends (Next 8 Hours)")
+fig, ax = plt.subplots(figsize=(10, 5))
+times = [e['time'][11:16] for e in short_data]  # Show time only
 waves = [e['waveHeight'] for e in short_data]
 winds = [e['windSpeed'] for e in short_data]
 
-plt.figure()
-plt.plot(times, waves, label="Wave Height")
-plt.plot(times, winds, label="Wind Speed")
-plt.legend()
+ax.plot(times, waves, label="Wave Height (m)", marker='o', color='blue')
+ax.plot(times, winds, label="Wind Speed (m/s)", marker='s', color='red')
+ax.set_xlabel("Time (HH:MM)")
+ax.set_ylabel("Value")
+ax.legend()
+ax.grid(True)
 plt.xticks(rotation=45)
+plt.tight_layout()
 
-st.pyplot(plt)
+st.pyplot(fig)
 
-st.subheader("Recommendation")
-st.warning(recommendation(current))
+st.markdown("---")
+
+# Recommendation
+st.subheader("🧭 Recommendation")
+st.info(recommendation(current))
+
+# Data Table
+st.subheader("📋 Detailed Data")
+st.dataframe(short_data)
