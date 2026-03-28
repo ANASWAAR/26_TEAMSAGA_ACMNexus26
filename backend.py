@@ -1,21 +1,47 @@
-import asyncio
 import datetime
 import os
 from typing import Optional
 
-from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Query
 from pydantic import BaseModel
+from dotenv import load_dotenv
+from geopy.distance import geodesic
 
-from data_fetch import prepare_fused_data
-from risk_analysis import prepare_risk_series, forecast_risk, generate_recommendation, format_status
-
+# ---------------- ENV ----------------
 load_dotenv()
 API_KEY = os.getenv("STORMGLASS_API_KEY")
 
-app = FastAPI(title="Coastal Risk API", version="1.0.0")
+# ✅ DEFINE APP FIRST (IMPORTANT)
+app = FastAPI()
 
-# In-memory cache that gets refreshed every 2 minutes
+# ---------------- HEALTH ROUTE ----------------
+@app.get("/health")
+def health_check():
+    return {"status": "ok"}
+
+# ---------------- COAST CHECK ----------------
+COAST_POINTS = [
+    (9.9312, 76.2673),
+    (8.5241, 76.9366),
+    (11.2588, 75.7804)
+]
+
+def is_near_coast(lat, lon, threshold_km=50):
+    user_location = (lat, lon)
+    for coast in COAST_POINTS:
+        if geodesic(user_location, coast).km <= threshold_km:
+            return True
+    return False
+
+# ---------------- RESPONSE MODEL ----------------
+class RiskResponse(BaseModel):
+    location: dict
+    status: str
+    risk_series: list
+    forecast: list
+    recommendations: list
+
+# ---------------- CACHE ----------------
 REALTIME_CACHE = {
     "updated_at": None,
     "payload": None,
@@ -27,123 +53,92 @@ REALTIME_CACHE = {
 
 REFRESH_INTERVAL_SECONDS = 120
 
+# ---------------- IMPORT LOGIC ----------------
+from data_fetch import prepare_fused_data
+from risk_analysis import prepare_risk_series, forecast_risk, generate_recommendation, format_status
 
-async def refresh_risk_data_loop() -> None:
-    """Continuously refresh fused risk data every REFRESH_INTERVAL_SECONDS."""
-    while True:
-        try:
-            location = REALTIME_CACHE
-            fused_payload = prepare_fused_data(API_KEY, location["lat"], location["lon"], location["hours"])
-            fused = fused_payload.get("fused", [])
-
-            if fused:
-                risk_series = prepare_risk_series(fused)
-                forecast = forecast_risk(risk_series, horizon=min(6, len(risk_series) - 1))
-
-                recommendations = []
-                for item in risk_series[:3]:
-                    recommendations.append(
-                        {
-                            "time": item["time"],
-                            "riskLabel": item["riskLabel"],
-                            "action": generate_recommendation(
-                                item["riskLabel"], location["user_type"], item["spike"], int(item["riskScore"] * 100)
-                            ),
-                        }
-                    )
-
-                REALTIME_CACHE.update(
-                    {
-                        "updated_at": datetime.datetime.utcnow(),
-                        "payload": {
-                            "location": {"lat": location["lat"], "lon": location["lon"], "sources": fused_payload.get("sources", [])},
-                            "status": format_status(data_age_mins=0.0, lat=location["lat"], lon=location["lon"]),
-                            "risk_series": risk_series,
-                            "forecast": forecast,
-                            "recommendations": recommendations,
-                        },
-                    }
-                )
-
-        except Exception:
-            # Keep last valid cache if refresh fails.
-            pass
-
-        await asyncio.sleep(REFRESH_INTERVAL_SECONDS)
-
-
-@app.on_event("startup")
-async def startup_event():
-    if not API_KEY:
-        return
-
-    # start the background refresh loop
-    app.state.refresh_task = asyncio.create_task(refresh_risk_data_loop())
-
-
-@app.on_event("shutdown")
-async def shutdown_event():
-    refresh_task = getattr(app.state, "refresh_task", None)
-    if refresh_task:
-        refresh_task.cancel()
-
-
-class RiskResponse(BaseModel):
-    location: dict
-    status: str
-    risk_series: list
-    forecast: list
-    recommendations: list
-
-
-@app.get("/health")
-def health_check():
-    return {"status": "ok", "message": "Coastal Risk Backend is running"}
-
-
+# ---------------- MAIN API ----------------
 @app.get("/risk", response_model=RiskResponse)
 def risk_analysis(
-    lat: float = Query(9.9312, description="Latitude"),
-    lon: float = Query(76.2673, description="Longitude"),
-    hours: int = Query(8, ge=4, le=24, description="Hours of forecast"),
-    user_type: Optional[str] = Query("Fishermen", description="User type for recommendation"),
-    force_refresh: bool = Query(False, description="Force an immediate backend refresh"),
+    lat: float = Query(9.9312),
+    lon: float = Query(76.2673),
+    hours: int = Query(8, ge=4, le=24),
+    user_type: Optional[str] = Query("Fishermen"),
+    force_refresh: bool = Query(False),
 ):
     if not API_KEY:
-        raise HTTPException(500, detail="Stormglass API key is missing in environment")
+        raise HTTPException(500, detail="Stormglass API key missing")
 
-    # if query location is same as cache, return cached payload for low latency
+    # 🌊 Coastal Check
+    near_coast = is_near_coast(lat, lon)
+
+    if not near_coast:
+        return {
+            "location": {"lat": lat, "lon": lon, "sources": []},
+            "status": "Inland Region - No Coastal Risk",
+            "risk_series": [
+                {
+                    "time": datetime.datetime.utcnow().isoformat(),
+                    "riskLabel": "SAFE",
+                    "riskScore": 0.1,
+                    "waveHeight": 0,
+                    "windSpeed": 0,
+                    "spike": False
+                }
+            ],
+            "forecast": [
+                {
+                    "time": datetime.datetime.utcnow().isoformat(),
+                    "predictedLabel": "SAFE",
+                    "probability": 100
+                }
+            ],
+            "recommendations": [
+                {
+                    "time": "Now",
+                    "riskLabel": "SAFE",
+                    "action": "This is an inland region. Coastal wave risk is not applicable."
+                }
+            ]
+        }
+
+    # ---------------- CACHE LOGIC ----------------
     cache_age = None
     if REALTIME_CACHE["payload"]:
         dt = REALTIME_CACHE["updated_at"]
         cache_age = (datetime.datetime.utcnow() - dt).total_seconds() if dt else None
 
-    same_location = lat == REALTIME_CACHE["lat"] and lon == REALTIME_CACHE["lon"] and hours == REALTIME_CACHE["hours"]
+    same_location = (
+        lat == REALTIME_CACHE["lat"] and
+        lon == REALTIME_CACHE["lon"] and
+        hours == REALTIME_CACHE["hours"]
+    )
 
-    if force_refresh or not same_location or not REALTIME_CACHE["payload"] or (cache_age is not None and cache_age > REFRESH_INTERVAL_SECONDS + 60):
-        # direct sync update when needed (e.g., 2-minute real-time guarantee)
+    if force_refresh or not same_location or not REALTIME_CACHE["payload"] or (
+        cache_age is not None and cache_age > REFRESH_INTERVAL_SECONDS + 60
+    ):
+
         fused_payload = prepare_fused_data(API_KEY, lat, lon, hours)
         fused = fused_payload.get("fused", [])
 
         if not fused:
-            raise HTTPException(502, detail="Failed to fetch fused data from upstream sources")
+            raise HTTPException(502, detail="Failed to fetch data")
 
         risk_series = prepare_risk_series(fused)
         forecast = forecast_risk(risk_series, horizon=min(6, len(risk_series) - 1))
 
         recommendations = []
         for item in risk_series[:3]:
-            recommendations.append(
-                {
-                    "time": item["time"],
-                    "riskLabel": item["riskLabel"],
-                    "action": generate_recommendation(item["riskLabel"], user_type, item["spike"], int(item["riskScore"] * 100)),
-                }
-            )
+            recommendations.append({
+                "time": item["time"],
+                "riskLabel": item["riskLabel"],
+                "action": generate_recommendation(
+                    item["riskLabel"], user_type, item["spike"], int(item["riskScore"] * 100)
+                ),
+            })
 
-        status = format_status(data_age_mins=0.0, lat=lat, lon=lon) if risk_series else "Offline"
+        status = format_status(0.0, lat, lon)
 
-        # update on-demand cache when same location selected so loop can catch up in background too
         if same_location:
             REALTIME_CACHE.update({
                 "lat": lat,
@@ -168,11 +163,4 @@ def risk_analysis(
             "recommendations": recommendations,
         }
 
-    # return cached response
     return REALTIME_CACHE["payload"]
-
-
-if __name__ == "__main__":
-    import uvicorn
-
-    uvicorn.run("backend:app", host="0.0.0.0", port=8000, reload=True)
