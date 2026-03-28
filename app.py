@@ -7,27 +7,25 @@ from streamlit_folium import st_folium
 from folium.plugins import HeatMap
 from dotenv import load_dotenv
 from geopy.geocoders import Nominatim
+import requests
 
-# Safe geolocation
+# ✅ AI IMPORT (SAFE)
 try:
-    from streamlit_js_eval import get_geolocation
-    GEO_AVAILABLE = True
+    from ai_helper import generate_ai_response
+    AI_AVAILABLE = True
 except:
-    GEO_AVAILABLE = False
-
-from alert_system import format_status, simulate_delivery
-from data_fetch import prepare_fused_data
-from risk_analysis import forecast_risk, generate_recommendation, prepare_risk_series
+    AI_AVAILABLE = False
 
 # ✅ MUST BE FIRST
 st.set_page_config(page_title="Climate Intelligence System", page_icon="🌊", layout="wide")
 
-# 🔐 Load API
+# 🔐 Load ENV
 load_dotenv()
 API_KEY = os.getenv("STORMGLASS_API_KEY")
+BACKEND_URL = os.getenv("RISK_API_URL", "http://localhost:8000")
 
 if not API_KEY:
-    st.error("API key not found")
+    st.error("API key missing")
     st.stop()
 
 # 🌊 TITLE
@@ -37,7 +35,7 @@ st.title("🌊 Coastal Climate Intelligence System")
 DEFAULT_LAT = 9.9312
 DEFAULT_LON = 76.2673
 
-# 🧠 SESSION STATE (IMPORTANT)
+# 🧠 SESSION STATE
 if "lat" not in st.session_state:
     st.session_state["lat"] = DEFAULT_LAT
 if "lon" not in st.session_state:
@@ -46,59 +44,96 @@ if "lon" not in st.session_state:
 lat = st.session_state["lat"]
 lon = st.session_state["lon"]
 
-# 📍 LOCATION CONTROLS
+from geopy.geocoders import Nominatim
+from geopy.exc import GeocoderUnavailable, GeocoderTimedOut
+
+# 🌍 Fast fallback city database (NO API needed)
+CITY_DB = {
+    "kochi": (9.9312, 76.2673),
+    "chennai": (13.0827, 80.2707),
+    "mumbai": (19.0760, 72.8777),
+    "goa": (15.2993, 74.1240),
+    "delhi": (28.6139, 77.2090),
+}
+
+# Geolocator with timeout
+geolocator = Nominatim(user_agent="coastal_app", timeout=5)
+
 st.subheader("📍 Location Controls")
 
-# 🔍 SEARCH
-geolocator = Nominatim(user_agent="coastal_app")
 location_name = st.text_input("🔍 Search location (e.g., Kochi, Chennai)")
 
 if location_name:
-    location = geolocator.geocode(location_name)
-    if location:
-        st.session_state["lat"] = location.latitude
-        st.session_state["lon"] = location.longitude
-        lat, lon = location.latitude, location.longitude
-        st.success(f"📍 {location.address}")
-    else:
-        st.error("Location not found")
+    name = location_name.lower().strip()
 
-# 📍 CURRENT LOCATION
-if GEO_AVAILABLE:
-    if st.button("📍 Use My Current Location"):
-        loc = get_geolocation()
-        if loc:
-            st.session_state["lat"] = loc["coords"]["latitude"]
-            st.session_state["lon"] = loc["coords"]["longitude"]
-            lat, lon = st.session_state["lat"], st.session_state["lon"]
-            st.success(f"Using: {lat:.4f}, {lon:.4f}")
+    # ⚡ 1. Instant local DB (FAST + RELIABLE)
+    if name in CITY_DB:
+        lat, lon = CITY_DB[name]
+        st.session_state["lat"] = lat
+        st.session_state["lon"] = lon
+        st.success(f"📍 Loaded {location_name.title()} instantly")
+        st.rerun()
+
+    # 🌍 2. Try online geocoding
+    else:
+        try:
+            location = geolocator.geocode(location_name)
+
+            if location:
+                st.session_state["lat"] = location.latitude
+                st.session_state["lon"] = location.longitude
+                st.success(f"📍 {location.address}")
+                st.rerun()
+            else:
+                st.warning("Location not found")
+
+        except (GeocoderUnavailable, GeocoderTimedOut):
+            st.warning("⚠️ Search service slow/unavailable. Try again.")
+
+        except Exception:
+            st.error("Unexpected error during search")
 
 # 📌 SIDEBAR
 with st.sidebar:
     st.header("Settings")
+
     lat = st.number_input("Latitude", value=st.session_state["lat"])
     lon = st.number_input("Longitude", value=st.session_state["lon"])
-    profile = st.radio("User profile", ["Fishermen", "Residents"])
-    forecast_hours = st.slider("Forecast hours", 3, 9, 6)
+    profile = st.radio("User", ["Fishermen", "Residents"])
+    forecast_hours = st.slider("Forecast Hours", 3, 9, 6)
 
     st.session_state["lat"] = lat
     st.session_state["lon"] = lon
 
-# 📡 DATA
-@st.cache_data(ttl=300)
-def load_weather_data(api_key, lat, lon, hours):
-    return prepare_fused_data(api_key, lat, lon, hours)
+# 📡 BACKEND CALL
+@st.cache_data(ttl=120)
+def fetch_backend(lat, lon, hours, user):
+    try:
+        res = requests.get(
+            f"{BACKEND_URL}/risk",
+            params={
+                "lat": lat,
+                "lon": lon,
+                "hours": hours,
+                "user_type": user
+            },
+            timeout=10
+        )
+        if res.status_code == 200:
+            return res.json()
+        return None
+    except:
+        return None
 
-weather_bundle = load_weather_data(API_KEY, lat, lon, forecast_hours)
-fused_data = weather_bundle.get("fused", [])
+backend_data = fetch_backend(lat, lon, forecast_hours, profile)
 
-if not fused_data:
-    st.error("Failed to load data")
+if not backend_data:
+    st.error("Backend not reachable")
     st.stop()
 
-risk_series = prepare_risk_series(fused_data)
+risk_series = backend_data["risk_series"]
+forecast = backend_data["forecast"]
 current = risk_series[0]
-forecast = forecast_risk(risk_series, forecast_hours)
 
 # 🗺️ MAP
 st.subheader("🗺️ Coastal Risk Map")
@@ -112,13 +147,11 @@ color_map = {
     "EXTREME": "black"
 }
 
-# Marker
 folium.Marker(
     [lat, lon],
-    popup=f"Risk: {current['riskLabel']}"
+    popup=f"{current['riskLabel']}"
 ).add_to(m)
 
-# Danger Zone
 folium.Circle(
     location=[lat, lon],
     radius=20000,
@@ -127,13 +160,18 @@ folium.Circle(
     fill_opacity=0.4
 ).add_to(m)
 
-# Heatmap
-heat_data = [[lat, lon, e["riskScore"]] for e in risk_series[:6]]
-HeatMap(heat_data).add_to(m)
+# 🔥 REAL GRID HEATMAP
+import numpy as np
+grid = []
+for dlat in np.linspace(-0.3, 0.3, 5):
+    for dlon in np.linspace(-0.3, 0.3, 5):
+        grid.append([lat + dlat, lon + dlon, current["riskScore"]])
+
+HeatMap(grid).add_to(m)
 
 map_data = st_folium(m, height=400, width=700)
 
-# 📌 CLICK UPDATE
+# 📍 CLICK UPDATE
 if map_data and map_data.get("last_clicked"):
     st.session_state["lat"] = map_data["last_clicked"]["lat"]
     st.session_state["lon"] = map_data["last_clicked"]["lng"]
@@ -141,38 +179,38 @@ if map_data and map_data.get("last_clicked"):
 
 # 🚨 ALERT
 if current["riskLabel"] in ["DANGER", "EXTREME"]:
-    st.error("🚨 EXTREME RISK: Avoid sea travel")
+    st.error("🚨 EXTREME RISK")
 elif current["riskLabel"] == "CAUTION":
-    st.warning("⚠️ Moderate risk")
+    st.warning("⚠️ CAUTION")
 else:
-    st.success("✅ Safe")
+    st.success("✅ SAFE")
 
 # 📊 METRICS
-st.subheader("📊 Current Conditions")
+st.subheader("📊 Conditions")
 col1, col2, col3 = st.columns(3)
 
-col1.metric("Wave Height", f"{current['waveHeight']:.2f} m")
-col2.metric("Wind Speed", f"{current['windSpeed']:.2f} m/s")
-col3.metric("Risk", f"{current['riskEmoji']} {current['riskLabel']}")
+col1.metric("Wave", f"{current['waveHeight']:.2f} m")
+col2.metric("Wind", f"{current['windSpeed']:.2f} m/s")
+col3.metric("Risk", current["riskLabel"])
+
+# 🤖 AI SECTION
+st.subheader("🤖 AI Coastal Advisor")
+
+if AI_AVAILABLE:
+    ai_text = generate_ai_response(current)
+    st.info(ai_text)
+else:
+    st.warning("AI not enabled")
 
 # 🔮 FORECAST
 st.subheader("🔮 Forecast")
+
 for item in forecast:
     st.write(f"{item['time'][11:16]} → {item['predictedLabel']} ({item['probability']}%)")
 
 # 🧭 RECOMMENDATION
 st.subheader("🧭 Recommendation")
-rec = generate_recommendation(
-    current["riskLabel"],
-    profile,
-    current["spike"],
-    forecast[0]["probability"] if forecast else 0,
-)
-st.info(rec)
-
-# 📱 ALERT LOGS
-st.subheader("📱 Alerts")
-st.code(simulate_delivery(rec, "SMS"))
+st.info(backend_data["recommendations"][0]["action"])
 
 # 📈 GRAPH
 st.subheader("📈 Risk Trend")
@@ -182,6 +220,10 @@ times = [e["time"][11:16] for e in risk_series[:forecast_hours]]
 scores = [e["riskScore"] for e in risk_series[:forecast_hours]]
 
 ax.plot(times, scores, marker="o")
+ax.axhspan(0.6, 1, alpha=0.2, color='red')
+ax.axhspan(0.3, 0.6, alpha=0.2, color='yellow')
+ax.axhspan(0, 0.3, alpha=0.2, color='green')
+
 ax.set_ylim(0, 1)
 ax.grid(True)
 
@@ -190,12 +232,3 @@ st.pyplot(fig)
 # 📋 TABLE
 st.subheader("📋 Data")
 st.dataframe(risk_series[:forecast_hours])
-
-# 🧭 LEGEND
-st.markdown("""
-### 🧭 Risk Legend
-- 🟢 SAFE  
-- 🟡 CAUTION  
-- 🔴 DANGER  
-- ⚫ EXTREME  
-""")
