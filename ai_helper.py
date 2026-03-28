@@ -1,35 +1,51 @@
+# ai_helper.py
 
+def generate_ai_response(current, user_type="Fishermen"):
+    wave = current["waveHeight"]
+    wind = current["windSpeed"]
+    risk = current["riskLabel"]
+    spike = current.get("spike", 0)
 
-from openai import OpenAI
-import os
+    # ---------------- BASE MESSAGE ----------------
+    base = f"""
+🌊 Coastal Risk Analysis
 
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+• Wave Height: {wave:.2f} m  
+• Wind Speed: {wind:.2f} m/s  
+• Risk Level: {risk}
+"""
 
-def generate_ai_response(current):
-    try:
-        prompt = f"""
-        You are a coastal safety expert.
+    # ---------------- RISK LOGIC ----------------
+    if risk == "EXTREME":
+        advice = "🚨 Extreme danger. Avoid all coastal and sea activity immediately."
+    elif risk == "DANGER":
+        advice = "⚠️ Dangerous conditions. Do NOT go to sea."
+    elif risk == "CAUTION":
+        advice = "⚠️ Moderate risk. Stay alert and monitor conditions."
+    else:
+        advice = "✅ Safe conditions. Normal activities can continue."
 
-        Current conditions:
-        - Wave height: {current['waveHeight']} meters
-        - Wind speed: {current['windSpeed']} m/s
-        - Risk level: {current['riskLabel']}
+    # ---------------- USER-SPECIFIC ----------------
+    if user_type == "Fishermen":
+        user_advice = "👨‍✈️ Fishermen: Delay trips and secure boats."
+    else:
+        user_advice = "🏠 Residents: Stay indoors near coastal areas if conditions worsen."
 
-        Explain the situation and give advice for fishermen.
-        Keep it short and clear.
-        """
+    # ---------------- SPIKE DETECTION ----------------
+    spike_msg = ""
+    if spike > 0.3:
+        spike_msg = "⚡ Sudden increase in risk detected. Conditions may worsen quickly."
 
-        response = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[
-                {"role": "system", "content": "You are a coastal safety assistant."},
-                {"role": "user", "content": prompt}
-            ],
-            max_tokens=120
-        )
+    # ---------------- FINAL RESPONSE ----------------
+    response = f"""
+{base}
 
-        return response.choices[0].message.content
+🧠 AI Recommendation:
+{advice}
 
-    except Exception as e:
-        return "AI service unavailable"
-    
+{user_advice}
+
+{spike_msg}
+"""
+
+    return response
